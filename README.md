@@ -175,7 +175,7 @@ Cоздайте ВМ, разверните на ней Elasticsearch. Устан
 
 Заббикс
 
-![zabbix](screensshots/zabbix.png)
+![zabbix](screensshots/Zabbix.png)
 
 Балансировщики
 
