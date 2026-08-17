@@ -163,23 +163,23 @@ Cоздайте ВМ, разверните на ней Elasticsearch. Устан
 
 Сайт
 
-![website](screenshots/site.png)
+![website](screensshots/site.png)
 
 Проверка балансировки
 
-![balancing](screenshots/balancing.png)
+![balancing](screensshots/balancing.png)
 
 Кибана
 
-![kibana](screenshots/kibana.png)
+![kibana](screensshots/kibana.png)
 
 Заббикс
 
-![zabbix](screenshots/zabbix.png)
+![zabbix](screensshots/zabbix.png)
 
 Балансировщики
 
-![lb](screenshots/load-balancer.png)
+![lb](screensshots/load-balancer.png)
 
 
 ---
