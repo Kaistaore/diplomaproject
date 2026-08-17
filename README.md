@@ -87,6 +87,75 @@ Cоздайте ВМ, разверните на ней Elasticsearch. Устан
 
 # Архитектура
 
+```mermaid
+
+graph TD
+    subgraph "Интернет"
+        User[Пользователь]
+    end
+
+    subgraph "Yandex Cloud"
+        subgraph "Публичная сеть (public-b)"
+            LB[Application Load Balancer<br>web-lb<br>81.26.177.0:80]
+            Bastion[Bastion Host<br>158.160.86.99:22]
+            Zabbix[Zabbix Server<br>158.160.18.181:80]
+            Kibana[Kibana<br>89.169.181.227:5601]
+        end
+
+        subgraph "Публичная сеть (public-a)"
+            NAT[NAT Instance<br>158.160.51.141]
+        end
+
+        subgraph "Приватная сеть (private-a)"
+            Web1[Web-1<br>10.0.11.11:80<br>Nginx + Filebeat]
+        end
+
+        subgraph "Приватная сеть (private-b)"
+            Web2[Web-2<br>10.0.12.8:80<br>Nginx + Filebeat]
+            Elastic[Elasticsearch<br>10.0.12.29:9200]
+        end
+
+        subgraph "База данных"
+            DB[Zabbix Database<br>MariaDB<br>localhost]
+        end
+    end
+
+    %% Связи
+    User -->|HTTP:80| LB
+    LB -->|Балансировка| Web1
+    LB -->|Балансировка| Web2
+
+    User -->|SSH:22| Bastion
+    Bastion -->|SSH Proxy| Web1
+    Bastion -->|SSH Proxy| Web2
+    Bastion -->|SSH| Zabbix
+    Bastion -->|SSH| Kibana
+    Bastion -->|SSH| Elastic
+
+    Web1 -->|Логи| Elastic
+    Web2 -->|Логи| Elastic
+    Elastic -->|Визуализация| Kibana
+
+    Web1 -->|Метрики| Zabbix
+    Web2 -->|Метрики| Zabbix
+    Zabbix -->|Хранение| DB
+
+    NAT -->|Интернет| Web1
+    NAT -->|Интернет| Web2
+    NAT -->|Интернет| Elastic
+
+    %% Стили
+    classDef public fill:#e1f5fe,stroke:#01579b,stroke-width:2px
+    classDef private fill:#fff3e0,stroke:#e65100,stroke-width:2px
+    classDef external fill:#e8f5e9,stroke:#2e7d32,stroke-width:2px
+    classDef database fill:#f3e5f5,stroke:#4a148c,stroke-width:2px
+
+    class LB,Bastion,Zabbix,Kibana,NAT public
+    class Web1,Web2,Elastic private
+    class User external
+    class DB database
+
+```
 
 # Используемые инструменты
 
