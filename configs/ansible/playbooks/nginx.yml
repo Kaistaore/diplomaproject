@@ -1,0 +1,74 @@
+---
+- name: Install and configure Nginx
+  hosts: webservers
+  become: yes
+  tasks:
+    - name: Update apt cache
+      apt:
+        update_cache: yes
+        cache_valid_time: 3600
+
+    - name: Install Nginx
+      apt:
+        name: nginx
+        state: present
+
+    - name: Start Nginx
+      service:
+        name: nginx
+        state: started
+        enabled: yes
+
+    - name: Create website directory
+      file:
+        path: /var/www/mysite
+        state: directory
+        owner: www-data
+        group: www-data
+        mode: '0755'
+
+    - name: Create index.html
+      copy:
+        dest: /var/www/mysite/index.html
+        content: |
+          <html>
+            <head><title>Diploma Project</title></head>
+            <body>
+              <h1>Welcome to {{ ansible_hostname }}</h1>
+              <p>IP: {{ ansible_default_ipv4.address }}</p>
+              <p>This is web server in Yandex Cloud</p>
+            </body>
+          </html>
+        owner: www-data
+        group: www-data
+        mode: '0644'
+
+    - name: Configure Nginx site
+      copy:
+        dest: /etc/nginx/sites-available/mysite
+        content: |
+          server {
+              listen 80;
+              server_name _;
+              root /var/www/mysite;
+              index index.html;
+          }
+        owner: root
+        group: root
+        mode: '0644'
+
+    - name: Enable site
+      file:
+        src: /etc/nginx/sites-available/mysite
+        dest: /etc/nginx/sites-enabled/mysite
+        state: link
+
+    - name: Remove default site
+      file:
+        path: /etc/nginx/sites-enabled/default
+        state: absent
+
+    - name: Restart Nginx
+      service:
+        name: nginx
+        state: restarted
