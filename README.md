@@ -303,6 +303,606 @@ yc application-load-balancer load-balancer create \
   --subnet-id $(yc vpc subnet get public-b --format yaml | grep "    id:" | awk '{print $2}')
 ```
 
+---
+
+### Конфигурационные файлы:
+
+[terraform](https://github.com/Kaistaore/diplomaproject/tree/main/configs/terraform)
+
+<details>
+<summary>main.tf</summary>
+
+```
+# ============================================
+# 1. VPC NETWORK
+# ============================================
+
+resource "yandex_vpc_network" "diploma" {
+  name        = var.vpc_name
+  description = "VPC network for diploma project"
+}
+
+# ============================================
+# 2. PUBLIC SUBNETS
+# ============================================
+
+resource "yandex_vpc_subnet" "public" {
+  for_each = var.public_subnet_cidrs
+  
+  name           = "public-${each.key}"
+  description    = "Public subnet in ${each.key}"
+  zone           = each.key
+  network_id     = yandex_vpc_network.diploma.id
+  v4_cidr_blocks = [each.value]
+}
+
+# ============================================
+# 3. PRIVATE SUBNETS (with NAT)
+# ============================================
+
+resource "yandex_vpc_subnet" "private" {
+  for_each = var.private_subnet_cidrs
+  
+  name           = "private-${each.key}"
+  description    = "Private subnet in ${each.key}"
+  zone           = each.key
+  network_id     = yandex_vpc_network.diploma.id
+  v4_cidr_blocks = [each.value]
+  
+  route_table_id = yandex_vpc_route_table.private_nat.id
+}
+
+# ============================================
+# 4. NAT INSTANCE (для доступа в интернет из приватных подсетей)
+# ============================================
+
+resource "yandex_compute_disk" "nat_disk" {
+  name  = "nat-disk"
+  type  = "network-hdd"
+  zone  = var.default_zone
+  size  = var.vm_disk_size
+  image_id = var.vm_image_id
+}
+
+resource "yandex_compute_instance" "nat" {
+  name        = "nat-instance"
+  platform_id = var.vm_platform
+  zone        = var.default_zone
+  
+  resources {
+    cores         = 2
+    memory        = 2
+    core_fraction = 20
+  }
+  
+  boot_disk {
+    disk_id = yandex_compute_disk.nat_disk.id
+  }
+  
+  network_interface {
+    subnet_id = yandex_vpc_subnet.public[var.default_zone].id
+    nat       = true
+  }
+  
+  metadata = {
+    user-data = "#cloud-config\nhostname: nat\nfqdn: nat.ru-central1.internal"
+    ssh-keys  = "ubuntu:${file(var.ssh_public_key)}"
+  }
+  
+  allow_stopping_for_update = true
+}
+
+# ============================================
+# 5. ROUTE TABLE (для приватных подсетей)
+# ============================================
+
+resource "yandex_vpc_route_table" "private_nat" {
+  name       = "private-nat-route"
+  network_id = yandex_vpc_network.diploma.id
+  
+  static_route {
+    destination_prefix = "0.0.0.0/0"
+    next_hop_address   = yandex_compute_instance.nat.network_interface.0.ip_address
+  }
+}
+
+# ============================================
+# 6. SECURITY GROUPS
+# ============================================
+
+# --- Bastion SG ---
+resource "yandex_vpc_security_group" "bastion" {
+  name        = "bastion-sg"
+  description = "Security group for bastion host"
+  network_id  = yandex_vpc_network.diploma.id
+  
+  ingress {
+    protocol       = "TCP"
+    description    = "SSH from anywhere"
+    v4_cidr_blocks = ["0.0.0.0/0"]
+    port           = 22
+  }
+  
+  egress {
+    protocol       = "ANY"
+    description    = "Allow all outgoing"
+    v4_cidr_blocks = ["0.0.0.0/0"]
+  }
+}
+
+# --- Web Servers SG ---
+resource "yandex_vpc_security_group" "web" {
+  name        = "web-sg"
+  description = "Security group for web servers"
+  network_id  = yandex_vpc_network.diploma.id
+  
+  ingress {
+    protocol       = "TCP"
+    description    = "HTTP from ALB"
+    v4_cidr_blocks = ["10.0.0.0/16"]
+    port           = 80
+  }
+  
+  ingress {
+    protocol       = "TCP"
+    description    = "SSH from bastion"
+    v4_cidr_blocks = [yandex_vpc_subnet.public[var.default_zone].v4_cidr_blocks.0]
+    port           = 22
+  }
+  
+  ingress {
+    protocol       = "TCP"
+    description    = "Zabbix Agent"
+    v4_cidr_blocks = ["10.0.0.0/16"]
+    port           = 10050
+  }
+  
+  egress {
+    protocol       = "ANY"
+    description    = "Allow all outgoing"
+    v4_cidr_blocks = ["0.0.0.0/0"]
+  }
+}
+
+# --- Zabbix SG ---
+resource "yandex_vpc_security_group" "zabbix" {
+  name        = "zabbix-sg"
+  description = "Security group for Zabbix server"
+  network_id  = yandex_vpc_network.diploma.id
+  
+  ingress {
+    protocol       = "TCP"
+    description    = "Zabbix web UI"
+    v4_cidr_blocks = ["0.0.0.0/0"]
+    port           = 80
+  }
+  
+  ingress {
+    protocol       = "TCP"
+    description    = "Zabbix web UI HTTPS"
+    v4_cidr_blocks = ["0.0.0.0/0"]
+    port           = 443
+  }
+  
+  ingress {
+    protocol       = "TCP"
+    description    = "Zabbix trapper from agents"
+    v4_cidr_blocks = ["10.0.0.0/16"]
+    port           = 10051
+  }
+  
+  ingress {
+    protocol       = "TCP"
+    description    = "SSH from bastion"
+    v4_cidr_blocks = [yandex_vpc_subnet.public[var.default_zone].v4_cidr_blocks.0]
+    port           = 22
+  }
+  
+  egress {
+    protocol       = "ANY"
+    v4_cidr_blocks = ["0.0.0.0/0"]
+  }
+}
+
+# --- Elasticsearch SG ---
+resource "yandex_vpc_security_group" "elasticsearch" {
+  name        = "elasticsearch-sg"
+  description = "Security group for Elasticsearch"
+  network_id  = yandex_vpc_network.diploma.id
+  
+  ingress {
+    protocol       = "TCP"
+    description    = "Elasticsearch API"
+    v4_cidr_blocks = ["10.0.0.0/16"]
+    port           = 9200
+  }
+  
+  ingress {
+    protocol       = "TCP"
+    description    = "SSH from bastion"
+    v4_cidr_blocks = [yandex_vpc_subnet.public[var.default_zone].v4_cidr_blocks.0]
+    port           = 22
+  }
+  
+  egress {
+    protocol       = "ANY"
+    v4_cidr_blocks = ["0.0.0.0/0"]
+  }
+}
+
+# --- Kibana SG ---
+resource "yandex_vpc_security_group" "kibana" {
+  name        = "kibana-sg"
+  description = "Security group for Kibana"
+  network_id  = yandex_vpc_network.diploma.id
+  
+  ingress {
+    protocol       = "TCP"
+    description    = "Kibana web UI"
+    v4_cidr_blocks = ["0.0.0.0/0"]
+    port           = 5601
+  }
+  
+  ingress {
+    protocol       = "TCP"
+    description    = "SSH from bastion"
+    v4_cidr_blocks = [yandex_vpc_subnet.public[var.default_zone].v4_cidr_blocks.0]
+    port           = 22
+  }
+  
+  egress {
+    protocol       = "ANY"
+    v4_cidr_blocks = ["0.0.0.0/0"]
+  }
+}
+
+# --- Application Load Balancer SG ---
+resource "yandex_vpc_security_group" "alb" {
+  name        = "alb-sg"
+  description = "Security group for Application Load Balancer"
+  network_id  = yandex_vpc_network.diploma.id
+  
+  ingress {
+    protocol       = "TCP"
+    description    = "HTTP from anywhere"
+    v4_cidr_blocks = ["0.0.0.0/0"]
+    port           = 80
+  }
+  
+  ingress {
+    protocol       = "TCP"
+    description    = "HTTPS from anywhere"
+    v4_cidr_blocks = ["0.0.0.0/0"]
+    port           = 443
+  }
+  
+  egress {
+    protocol       = "ANY"
+    v4_cidr_blocks = ["0.0.0.0/0"]
+  }
+}
+
+# ============================================
+# 7. BASTION HOST (Jump Host)
+# ============================================
+
+resource "yandex_compute_disk" "bastion_disk" {
+  name  = "bastion-disk"
+  type  = "network-hdd"
+  zone  = var.default_zone
+  size  = var.vm_disk_size
+  image_id = var.vm_image_id
+}
+
+resource "yandex_compute_instance" "bastion" {
+  name        = "bastion"
+  platform_id = var.vm_platform
+  zone        = var.default_zone
+  
+  resources {
+    cores         = var.vm_cores
+    memory        = var.vm_memory
+    core_fraction = var.vm_core_fraction
+  }
+  
+  boot_disk {
+    disk_id = yandex_compute_disk.bastion_disk.id
+  }
+  
+  network_interface {
+    subnet_id          = yandex_vpc_subnet.public[var.default_zone].id
+    nat                = true
+    security_group_ids = [yandex_vpc_security_group.bastion.id]
+  }
+  
+  metadata = {
+    user-data = "#cloud-config\nhostname: bastion\nfqdn: bastion.ru-central1.internal"
+    ssh-keys  = "ubuntu:${file(var.ssh_public_key)}"
+  }
+  
+  allow_stopping_for_update = true
+}
+
+# ============================================
+# 8. OUTPUTS
+# ============================================
+
+output "bastion_public_ip" {
+  value       = yandex_compute_instance.bastion.network_interface.0.nat_ip_address
+  description = "Public IP of bastion host (for SSH)"
+}
+
+output "bastion_private_ip" {
+  value       = yandex_compute_instance.bastion.network_interface.0.ip_address
+  description = "Private IP of bastion host"
+}
+
+output "nat_instance_ip" {
+  value       = yandex_compute_instance.nat.network_interface.0.ip_address
+  description = "Private IP of NAT instance"
+}
+
+output "vpc_id" {
+  value       = yandex_vpc_network.diploma.id
+  description = "VPC network ID"
+```
+</details>
+
+<details>
+<summary>providers.tf</summary>
+
+```
+terraform {
+  required_version = ">= 1.0"
+  
+  required_providers {
+    yandex = {
+      source  = "local/yandex-cloud/yandex"
+      version = "0.130.0"
+    }
+  }
+}
+
+provider "yandex" {
+  token     = var.yc_token
+  cloud_id  = var.cloud_id
+  folder_id = var.folder_id
+  zone      = var.default_zone
+}
+```
+
+</details>
+
+<details>
+<summary>variables.tf</summary>
+
+```
+# Terraform variables example
+# Copy this file to terraform.tfvars and fill in your values
+
+yc_token     = "YOUR_YANDEX_CLOUD_TOKEN"
+cloud_id     = "YOUR_CLOUD_ID"
+folder_id    = "YOUR_FOLDER_ID"
+ssh_public_key = "~/.ssh/id_rsa.pub"
+
+vm_preemptible = true
+vm_cores = 2
+vm_core_fraction = 20
+vm_memory = 4
+vm_disk_size = 10
+vm_image_id = "fd806c8slu9j1pa87msc"
+```
+
+</details>
+
+<details>
+<summary>terraform.tfvars.example</summary>
+
+```
+variable "yc_token" {
+  description = "IAM token for Yandex Cloud"
+  type        = string
+  sensitive   = true
+}
+
+variable "cloud_id" {
+  description = "Yandex Cloud ID"
+  type        = string
+}
+
+variable "folder_id" {
+  description = "Yandex Cloud Folder ID"
+  type        = string
+}
+
+variable "default_zone" {
+  description = "Default availability zone"
+  type        = string
+  default     = "ru-central1-a"
+}
+
+variable "zones" {
+  description = "Availability zones for VMs"
+  type        = list(string)
+  default     = ["ru-central1-a", "ru-central1-b"]
+}
+
+variable "vpc_name" {
+  description = "VPC network name"
+  type        = string
+  default     = "diploma-vpc"
+}
+
+variable "public_subnet_cidrs" {
+  description = "CIDR blocks for public subnets"
+  type        = map(string)
+  default = {
+    "ru-central1-a" = "10.0.1.0/24"
+    "ru-central1-b" = "10.0.2.0/24"
+  }
+}
+
+variable "private_subnet_cidrs" {
+  description = "CIDR blocks for private subnets"
+  type        = map(string)
+  default = {
+    "ru-central1-a" = "10.0.11.0/24"
+    "ru-central1-b" = "10.0.12.0/24"
+  }
+}
+
+variable "ssh_public_key" {
+  description = "Path to public SSH key"
+  type        = string
+  default     = "~/.ssh/id_rsa.pub"
+}
+
+variable "vm_platform" {
+  description = "Platform type for VMs (Intel Ice Lake)"
+  type        = string
+  default     = "standard-v3"
+}
+
+variable "vm_cores" {
+  description = "Number of CPU cores"
+  type        = number
+  default     = 2
+}
+
+variable "vm_core_fraction" {
+  description = "CPU core fraction (20% for preemptible)"
+  type        = number
+  default     = 20
+}
+
+variable "vm_memory" {
+  description = "Memory in GB"
+  type        = number
+  default     = 4
+}
+
+variable "vm_disk_size" {
+  description = "Disk size in GB (HDD)"
+  type        = number
+  default     = 10
+}
+
+variable "vm_image_id" {
+  description = "Ubuntu 22.04 LTS image ID in Yandex Cloud"
+  type        = string
+  default     = "f8d806c8slu9j1pa87msc"
+}
+
+variable "vm_preemptible" {
+  description = "Use preemptible instances (cheaper, max 24h)"
+  type        = bool
+  default     = true
+}
+```
+
+</details>
+
+[ansible](https://github.com/Kaistaore/diplomaproject/tree/main/configs/ansible)
+
+<details>
+<summary>hosts.ini</summary>
+
+```
+[webservers]
+web-1 ansible_host=web-1.ru-central1.internal ansible_user=ubuntu
+web-2 ansible_host=web-2.ru-central1.internal ansible_user=ubuntu
+
+[all:vars]
+ansible_ssh_private_key_file=/home/ubuntu/.ssh/id_rsa
+ansible_ssh_common_args='-o StrictHostKeyChecking=no'
+```
+
+</details>
+
+<details>
+<summary>nginx.yml</summary>
+
+```
+---
+- name: Install and configure Nginx
+  hosts: webservers
+  become: yes
+  tasks:
+    - name: Update apt cache
+      apt:
+        update_cache: yes
+        cache_valid_time: 3600
+
+    - name: Install Nginx
+      apt:
+        name: nginx
+        state: present
+
+    - name: Start Nginx
+      service:
+        name: nginx
+        state: started
+        enabled: yes
+
+    - name: Create website directory
+      file:
+        path: /var/www/mysite
+        state: directory
+        owner: www-data
+        group: www-data
+        mode: '0755'
+
+    - name: Create index.html
+      copy:
+        dest: /var/www/mysite/index.html
+        content: |
+          <html>
+            <head><title>Diploma Project</title></head>
+            <body>
+              <h1>Welcome to {{ ansible_hostname }}</h1>
+              <p>IP: {{ ansible_default_ipv4.address }}</p>
+              <p>This is web server in Yandex Cloud</p>
+            </body>
+          </html>
+        owner: www-data
+        group: www-data
+        mode: '0644'
+
+    - name: Configure Nginx site
+      copy:
+        dest: /etc/nginx/sites-available/mysite
+        content: |
+          server {
+              listen 80;
+              server_name _;
+              root /var/www/mysite;
+              index index.html;
+          }
+        owner: root
+        group: root
+        mode: '0644'
+
+    - name: Enable site
+      file:
+        src: /etc/nginx/sites-available/mysite
+        dest: /etc/nginx/sites-enabled/mysite
+        state: link
+
+    - name: Remove default site
+      file:
+        path: /etc/nginx/sites-enabled/default
+        state: absent
+
+    - name: Restart Nginx
+      service:
+        name: nginx
+        state: restarted
+```
+
+</details>
+
+---
+
 # Использованные источники
 
 [Документация Yandex Cloud](https://cloud.yandex.ru/docs)
