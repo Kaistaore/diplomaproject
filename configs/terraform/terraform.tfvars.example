@@ -1,0 +1,14 @@
+# Terraform variables example
+# Copy this file to terraform.tfvars and fill in your values
+
+yc_token     = "YOUR_YANDEX_CLOUD_TOKEN"
+cloud_id     = "YOUR_CLOUD_ID"
+folder_id    = "YOUR_FOLDER_ID"
+ssh_public_key = "~/.ssh/id_rsa.pub"
+
+vm_preemptible = true
+vm_cores = 2
+vm_core_fraction = 20
+vm_memory = 4
+vm_disk_size = 10
+vm_image_id = "fd806c8slu9j1pa87msc"
